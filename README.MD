@@ -1,4 +1,4 @@
-# Zoidberg 2.0
+# Zoidberg 2.0 - NCE_10
 
 ## Workflow
 
@@ -18,4 +18,18 @@ Activate the virtual environment in jupyter notebooks and when using pip/python 
 ```sh
 pip install ipykernel # example
 pip freeze > requirements.txt # update dependencies
+```
+
+## Structure
+
+```sh
+.
+├── tests # various tests done by project members
+├── bootstrap # bootstrap realised by each project member
+├── data
+│   ├── mnist # instructions on loading and inspecting bootstrap data
+│   └── radios # 1) instructions on loading and inspecting bootstrap data
+├── ... # data cleaning
+├── ... # model training 
+└── ... # model evaluation 
 ```

@@ -1,5 +1,0 @@
-# ignore folders
-**/*
-
-# keep files at the root
-!*.*
