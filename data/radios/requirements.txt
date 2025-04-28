@@ -1,4 +1,6 @@
-tensorflow
+
 pillow
 matplotlib
 tqdm
+prettytable
+scipy
