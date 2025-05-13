@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import filedialog, Label, Button, Frame, ttk
+from tkinter import filedialog, Label, Button, Frame, ttk, Scale
 from PIL import Image, ImageTk
 import numpy as np
 import torch
@@ -37,10 +37,15 @@ class PneumoniaDetectorApp:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.load_model()
 
+        # Maintenir un seuil bas pour minimiser les faux négatifs
+        self.threshold = 0.02
+        
+        # Variables pour stocker les résultats
         self.probas = []
         self.true_labels = []
         self.predicted_labels = []
         self.file_paths = []
+        self.current_image_probs = None
 
         self.create_widgets()
 
@@ -112,6 +117,45 @@ class PneumoniaDetectorApp:
         self.folder_button = Button(button_frame, text="Analyser un dossier", command=self.load_folder, font=("Arial", 12))
         self.folder_button.pack(side=tk.LEFT, padx=10)
 
+        # Ajouter un contrôle de seuil avec slider et saisie manuelle
+        threshold_frame = Frame(main_frame)
+        threshold_frame.pack(pady=5, fill=tk.X)
+
+        threshold_label = Label(threshold_frame, text="Seuil de détection (plus bas = moins de faux négatifs)", font=("Arial", 11))
+        threshold_label.pack(anchor="w")
+
+        slider_frame = Frame(threshold_frame)
+        slider_frame.pack(fill=tk.X, pady=5)
+
+        self.threshold_var = tk.DoubleVar(value=self.threshold)
+        self.threshold_slider = Scale(slider_frame, from_=0.001, to=1.0,
+                                    resolution=0.001, orient="horizontal",
+                                    variable=self.threshold_var,
+                                    length=300,
+                                    command=self.threshold_changed)
+        self.threshold_slider.pack(side=tk.LEFT)
+
+        # Ajouter un champ de saisie manuelle
+        self.threshold_entry = tk.Entry(slider_frame, width=8, font=("Arial", 10))
+        self.threshold_entry.insert(0, str(self.threshold))
+        self.threshold_entry.pack(side=tk.LEFT, padx=5)
+
+        # Bouton pour valider la saisie manuelle
+        manual_apply_button = Button(slider_frame, text="OK", command=self.apply_manual_threshold, font=("Arial", 10))
+        manual_apply_button.pack(side=tk.LEFT, padx=2)
+
+        # Étiquette pour afficher la valeur actuelle
+        threshold_value_label = Label(slider_frame, textvariable=self.threshold_var, width=5)
+        threshold_value_label.pack(side=tk.LEFT, padx=5)
+
+        apply_button = Button(slider_frame, text="Appliquer", command=self.apply_threshold, font=("Arial", 10))
+        apply_button.pack(side=tk.LEFT, padx=10)
+        # Information sur les faux négatifs
+        fn_info = Label(threshold_frame, 
+                      text="Note: Un seuil bas (ex: 0.02) minimise les faux négatifs mais peut augmenter les faux positifs.", 
+                      font=("Arial", 10, "italic"), fg="gray")
+        fn_info.pack(anchor="w", pady=2)
+
         self.notebook = ttk.Notebook(main_frame)
         self.notebook.pack(fill=tk.BOTH, expand=True, pady=10)
 
@@ -127,6 +171,10 @@ class PneumoniaDetectorApp:
         # New tab for ROC curve
         self.roc_frame = Frame(self.notebook)
         self.notebook.add(self.roc_frame, text="Courbe ROC")
+
+        # Tab pour analyse des faux négatifs
+        self.fn_frame = Frame(self.notebook)
+        self.notebook.add(self.fn_frame, text="Analyse des faux négatifs")
 
         # Image unique
         self.image_frame = Frame(self.single_frame, width=400, height=400, bd=2, relief=tk.SUNKEN)
@@ -155,9 +203,89 @@ class PneumoniaDetectorApp:
         self.roc_scroll_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         self.roc_inner_frame = self.create_scrollable_frame(self.roc_scroll_frame)
 
+        # Faux négatifs frame
+        self.fn_scroll_frame = Frame(self.fn_frame)
+        self.fn_scroll_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.fn_inner_frame = self.create_scrollable_frame(self.fn_scroll_frame)
+
         # Status bar
         self.status_bar = Label(self.root, text="Prêt", bd=1, relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def apply_manual_threshold(self):
+        """Applique le seuil entré manuellement"""
+        try:
+            manual_value = float(self.threshold_entry.get())
+            if 0 <= manual_value <= 1:
+                self.threshold_var.set(manual_value)
+                self.threshold = manual_value
+                self.threshold_slider.set(manual_value)
+                self.status_bar.config(text=f"Seuil mis à jour: {self.threshold}")
+                
+                # Si des données ont déjà été analysées, recalculer les prédictions
+                if self.probas:
+                    self.recalculate_predictions()
+            else:
+                self.status_bar.config(text="Erreur: Le seuil doit être entre 0 et 1")
+        except ValueError:
+            self.status_bar.config(text="Erreur: Valeur de seuil invalide")
+            # Réinitialiser la valeur dans le champ de saisie
+            self.threshold_entry.delete(0, tk.END)
+            self.threshold_entry.insert(0, str(self.threshold))
+    def threshold_changed(self, value):
+        """Callback quand le slider est manipulé"""
+        # Mettre à jour le champ de saisie
+        self.threshold_entry.delete(0, tk.END)
+        self.threshold_entry.insert(0, value)
+
+    def apply_threshold(self):
+        """Applique le nouveau seuil et recalcule les prédictions"""
+        try:
+            new_threshold = float(self.threshold_var.get())
+            if new_threshold < 0 or new_threshold > 1:
+                self.status_bar.config(text="Erreur: Le seuil doit être entre 0 et 1")
+                return
+                
+            self.threshold = new_threshold
+            self.status_bar.config(text=f"Seuil mis à jour: {self.threshold}")
+            # Mettre à jour le champ de saisie
+            self.threshold_entry.delete(0, tk.END)
+            self.threshold_entry.insert(0, str(new_threshold))
+            
+            # Si des données ont déjà été analysées, recalculer les prédictions
+            if self.probas:
+                self.recalculate_predictions()
+                
+        except ValueError:
+            self.status_bar.config(text="Erreur: Valeur de seuil invalide")
+    
+    def recalculate_predictions(self):
+        """Recalcule les prédictions avec le nouveau seuil"""
+        self.predicted_labels = []
+        for probs in self.probas:
+            pred_label = int(probs[1] > self.threshold)
+            self.predicted_labels.append(pred_label)
+            
+        # Mettre à jour les visualisations
+        self.create_plot_binary()
+        self.create_advanced_metrics_binary()
+        self.create_roc_curve()
+        self.analyze_false_negatives()
+        
+        # Si une image est actuellement affichée, mettre à jour son diagnostic
+        if hasattr(self, 'current_image_probs') and self.current_image_probs is not None:
+            pred_label = int(self.current_image_probs[1] > self.threshold)
+            classes = ['NORMAL', 'MALADE']
+            pred_class = classes[pred_label]
+            if pred_class == 'NORMAL':
+                diag = "Normal"
+                color = "blue"
+            else:
+                diag = "Malade"
+                color = "red"
+            prob_text = ", ".join([f"{c}: {p*100:.2f}%" for c, p in zip(classes, self.current_image_probs)])
+            self.result_label.config(text=f"Diagnostic: {diag}", fg=color)
+            self.probability_label.config(text=prob_text)
 
     def load_image(self):
         file_path = filedialog.askopenfilename(
@@ -197,9 +325,13 @@ class PneumoniaDetectorApp:
                 with torch.no_grad():
                     output = self.model(img_tensor)
                     probs = torch.softmax(output, dim=1)[0].cpu().numpy()
+                
+                # Sauvegarder les probabilités pour l'image actuelle
+                self.current_image_probs = probs
+                
                 classes = ['NORMAL', 'MALADE']
-                pred_idx = probs.argmax()
-                pred_class = classes[pred_idx]
+                pred_label = int(probs[1] > self.threshold)  # Utilise le seuil actuel
+                pred_class = classes[pred_label]
                 if pred_class == 'NORMAL':
                     diag = "Normal"
                     color = "blue"
@@ -236,14 +368,15 @@ class PneumoniaDetectorApp:
                         else:  # bacteria ou virus => malade
                             true_label = 1
                         probs = self.process_single_image_for_batch(file_path)
-                        pred_label = probs.argmax()
+                        pred_label = int(probs[1] > self.threshold)  # Utilise le seuil actuel
                         self.true_labels.append(true_label)
                         self.predicted_labels.append(pred_label)
                         self.probas.append(probs)
                         self.file_paths.append(file_path)
             self.create_plot_binary()
             self.create_advanced_metrics_binary()
-            self.create_roc_curve()  # Add ROC curve creation
+            self.create_roc_curve()
+            self.analyze_false_negatives()
             self.status_bar.config(text=f"Analyse terminée: {len(self.true_labels)} images traitées")
         except Exception as e:
             self.status_bar.config(text=f"Erreur lors de l'analyse du dossier: {str(e)}")
@@ -284,6 +417,12 @@ class PneumoniaDetectorApp:
             mean_val = np.mean(probas[:, i])
             ax.axvline(mean_val, color=color, linestyle='--', linewidth=1)
             ax.text(mean_val + 0.02, ax.get_ylim()[1]*0.9, f"Mean {cls}: {mean_val:.2f}", color=color)
+        
+        # Ajouter une ligne verticale pour le seuil actuel
+        ax.axvline(self.threshold, color='red', linestyle='-', linewidth=2)
+        ax.text(self.threshold + 0.02, ax.get_ylim()[1]*0.8, f"Seuil: {self.threshold:.3f}", 
+                color='red', fontweight='bold')
+        
         ax.legend(title="Classes")
         ax.set_title('Distribution des probabilités par classe')
         ax.set_xlabel('Probabilité')
@@ -318,6 +457,7 @@ class PneumoniaDetectorApp:
         text.insert(tk.END, report)
         text.config(state=tk.DISABLED)
         text.pack(pady=5)
+        
         # Matrice de confusion avec seaborn
         cm = confusion_matrix(self.true_labels, self.predicted_labels)
         fig, ax = plt.subplots(figsize=(6, 5))
@@ -329,19 +469,33 @@ class PneumoniaDetectorApp:
         canvas = FigureCanvasTkAgg(fig, master=self.metrics_inner_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(pady=5)
+        
+        # Calcul des faux négatifs et faux positifs
+        tn, fp, fn, tp = cm.ravel()
+        
         # Métriques globales
         acc = accuracy_score(self.true_labels, self.predicted_labels)
         f1 = f1_score(self.true_labels, self.predicted_labels, average='weighted')
         recall = recall_score(self.true_labels, self.predicted_labels, average='weighted')
         precision = precision_score(self.true_labels, self.predicted_labels, average='weighted')
+        
+        # Métriques spécifiques aux faux négatifs
+        false_negative_rate = fn / (fn + tp) if (fn + tp) > 0 else 0
+        false_positive_rate = fp / (fp + tn) if (fp + tn) > 0 else 0
+        
         metrics_text = (
             f"Accuracy globale : {acc*100:.2f}%\n"
             f"F1-score (pondéré) : {f1:.3f}\n"
             f"Recall (rappel, pondéré) : {recall:.3f}\n"
-            f"Precision (pondérée) : {precision:.3f}"
+            f"Precision (pondérée) : {precision:.3f}\n\n"
+            f"Taux de faux négatifs (FNR) : {false_negative_rate:.3f}\n"
+            f"Taux de faux positifs (FPR) : {false_positive_rate:.3f}\n"
+            f"Nombre de faux négatifs : {fn} / {fn + tp} cas malades\n"
+            f"Nombre de faux positifs : {fp} / {fp + tn} cas normaux"
         )
         metrics_label = Label(self.metrics_inner_frame, text=metrics_text, font=("Arial", 12, "bold"))
         metrics_label.pack(pady=10)
+        
         # Répartition des classes (vrai / prédit)
         pred_counts = [self.predicted_labels.count(i) for i in range(len(classes))]
         true_counts = [self.true_labels.count(i) for i in range(len(classes))]
@@ -350,6 +504,7 @@ class PneumoniaDetectorApp:
             repartition_text += f"{cls}: {true_counts[i]} / {pred_counts[i]}\n"
         repartition_label = Label(self.metrics_inner_frame, text=repartition_text, font=("Arial", 11))
         repartition_label.pack(pady=5)
+        
         # Affichage des erreurs (images mal classées)
         incorrect = [i for i, (t, p) in enumerate(zip(self.true_labels, self.predicted_labels)) if t != p]
         if incorrect:
@@ -362,6 +517,90 @@ class PneumoniaDetectorApp:
                 err_text = f"{os.path.basename(img_path)} | Vrai: {true_cls} | Prédit: {pred_cls}"
                 err_line = Label(self.metrics_inner_frame, text=err_text, font=("Arial", 10), fg="red")
                 err_line.pack(anchor="w")
+    def analyze_false_negatives(self):
+        """Analyse les cas de faux négatifs pour aider à comprendre les erreurs critiques"""
+        for widget in self.fn_inner_frame.winfo_children():
+            widget.destroy()
+            
+        if not self.true_labels or not self.probas:
+            no_data_label = Label(self.fn_inner_frame, text="Aucune donnée à afficher", font=("Arial", 14))
+            no_data_label.pack(pady=20)
+            return
+            
+        # Identifier les faux négatifs (vrai=1, prédit=0)
+        false_negatives = [i for i, (true, pred) in enumerate(zip(self.true_labels, self.predicted_labels)) 
+                            if true == 1 and pred == 0]
+        
+        # Section d'information
+        info_label = Label(self.fn_inner_frame, 
+                        text=f"Analyse des faux négatifs (cas malades non détectés): {len(false_negatives)} trouvés",
+                        font=("Arial", 12, "bold"))
+        info_label.pack(pady=10)
+        
+        if not false_negatives:
+            no_fn_label = Label(self.fn_inner_frame, text="Aucun faux négatif trouvé - excellent!", 
+                            font=("Arial", 12), fg="green")
+            no_fn_label.pack(pady=10)
+            return
+        
+        # Afficher les statistiques de probabilités pour les faux négatifs
+        probs_fn = [self.probas[i][1] for i in false_negatives]  # Probabilités pour la classe positive
+        
+        stats_text = (
+            f"Statistiques des probabilités pour les faux négatifs:\n"
+            f"Probabilité moyenne: {np.mean(probs_fn):.3f}\n"
+            f"Probabilité min: {np.min(probs_fn):.3f}, max: {np.max(probs_fn):.3f}\n"
+            f"Distance moyenne au seuil: {self.threshold - np.mean(probs_fn):.3f}"
+        )
+        
+        stats_label = Label(self.fn_inner_frame, text=stats_text, font=("Arial", 11))
+        stats_label.pack(pady=5)
+        
+        # Afficher la distribution des probabilités des faux négatifs
+        fig, ax = plt.subplots(figsize=(8, 5))
+        sns.histplot(probs_fn, bins=20, color="red", kde=True, ax=ax)
+        ax.axvline(self.threshold, color='black', linestyle='--', linewidth=2, 
+                    label=f'Seuil actuel: {self.threshold:.3f}')
+        ax.set_title('Distribution des probabilités pour les faux négatifs')
+        ax.set_xlabel('Probabilité de la classe MALADE')
+        ax.set_ylabel('Fréquence')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        canvas = FigureCanvasTkAgg(fig, master=self.fn_inner_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(pady=10)
+        
+        # Afficher quelques exemples de faux négatifs
+        examples_label = Label(self.fn_inner_frame, text="Exemples de faux négatifs:", font=("Arial", 11, "bold"))
+        examples_label.pack(pady=5, anchor="w")
+        
+        # Limiter à 10 exemples maximum
+        for idx in false_negatives[:10]:
+            img_path = self.file_paths[idx]
+            prob = self.probas[idx][1] * 100  # Probabilité pour la classe positive en %
+            example_text = f"{os.path.basename(img_path)} | Probabilité MALADE: {prob:.2f}% | Seuil: {self.threshold*100:.2f}%"
+            example_label = Label(self.fn_inner_frame, text=example_text, font=("Arial", 10))
+            example_label.pack(anchor="w")
+        
+        # Recommandations
+        recom_frame = Frame(self.fn_inner_frame, bd=2, relief=tk.GROOVE, padx=10, pady=10)
+        recom_frame.pack(fill=tk.X, pady=10)
+        
+        recom_title = Label(recom_frame, text="Recommandations pour réduire les faux négatifs:", 
+                        font=("Arial", 11, "bold"))
+        recom_title.pack(anchor="w", pady=5)
+        
+        recommendations = [
+            "Diminuer le seuil de détection pour augmenter la sensibilité",
+            "Ajouter plus d'exemples de pneumonie dans l'ensemble d'entraînement",
+            "Utiliser l'augmentation de données sur les cas de pneumonie",
+            "Envisager un modèle avec une meilleure sensibilité (même au prix de faux positifs)"
+        ]
+        
+        for rec in recommendations:
+            rec_label = Label(recom_frame, text="• " + rec, font=("Arial", 10), wraplength=600, justify=tk.LEFT)
+            rec_label.pack(anchor="w", pady=2)
 
     def create_roc_curve(self):
         """Create ROC curve visualization"""
@@ -392,23 +631,36 @@ class PneumoniaDetectorApp:
         ax.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', 
                 label='Random classifier')
         
-        # Add annotations for selected thresholds
-        # Only show a subset of thresholds to avoid cluttering
-        threshold_indices = np.linspace(0, len(thresholds) - 1, 5, dtype=int)
-        for i in threshold_indices:
-            if i < len(thresholds) and i < len(fpr) and i < len(tpr):
-                ax.annotate(f"{thresholds[i]:.2f}", 
-                           xy=(fpr[i], tpr[i]), 
-                           xytext=(fpr[i]+0.05, tpr[i]-0.05),
-                           arrowprops=dict(arrowstyle="->", connectionstyle="arc3"))
+        # Marquer le seuil actuel sur la courbe ROC
+        # Trouver l'index du seuil le plus proche de notre seuil actuel
+        threshold_diff = np.abs(thresholds - self.threshold)
+        closest_idx = np.argmin(threshold_diff)
         
-        # Add optimization point (best threshold)
-        # Find best threshold based on Youden's J statistic (tpr - fpr)
-        j_scores = tpr - fpr
-        best_idx = np.argmax(j_scores)
-        best_threshold = thresholds[best_idx]
-        ax.plot(fpr[best_idx], tpr[best_idx], 'ro', markersize=8, 
-                label=f'Optimal threshold = {best_threshold:.3f}')
+        if closest_idx < len(fpr) and closest_idx < len(tpr):
+            ax.plot(fpr[closest_idx], tpr[closest_idx], 'ro', markersize=8, 
+                    label=f'Seuil actuel = {self.threshold:.3f}')
+        
+        # Find index for high sensitivity (minimize false negatives)
+        # Nous voulons trouver un bon compromis entre sensibilité élevée (>0.95) et FPR raisonnable
+        target_sensitivity = 0.95
+        # Trouver les indices où TPR (sensibilité) >= 0.95
+        high_sensitivity_indices = np.where(tpr >= target_sensitivity)[0]
+        
+        # Définir best_threshold et best_idx (correction)
+        best_idx = closest_idx  # Valeur par défaut
+        best_threshold = self.threshold  # Valeur par défaut
+        
+        if len(high_sensitivity_indices) > 0:
+            # Parmi ces indices, trouver celui qui minimise FPR
+            optimal_idx = high_sensitivity_indices[np.argmin(fpr[high_sensitivity_indices])]
+            optimal_threshold = thresholds[optimal_idx]
+            
+            # Mettre à jour best_idx et best_threshold
+            best_idx = optimal_idx
+            best_threshold = optimal_threshold
+            
+            ax.plot(fpr[optimal_idx], tpr[optimal_idx], 'go', markersize=8, 
+                    label=f'Seuil recommandé = {optimal_threshold:.3f}')
         
         # Plot formatting
         ax.set_xlim([0.0, 1.0])
